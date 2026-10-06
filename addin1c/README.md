@@ -31,3 +31,14 @@ Create a `.vscode/launch.json` file:
     ]
 }
 ```
+
+## Фактический режим подключения
+
+Форк добавляет `unsafe Connection::is_attached_isolated() -> Option<bool>` через
+SDK-интерфейс `IAttachedInfo` (`IAddInDefBaseEx::GetInterface(eIAttachedInfo)`).
+`Some(true)` означает изолированное подключение, `Some(false)` — обычное;
+отсутствующий интерфейс или неизвестное значение возвращают `None`.
+Вызывать метод можно только на живом connection после объявления платформой
+расширенных интерфейсов (`SetPlatformCapabilities >= 1`). `GetAttachType`
+объявляет возможности компоненты и не заменяет эту проверку. Windows/Linux/macOS
+используют desktop SDK значение `eIAttachedInfo = 2`; Android не входит в этот API.

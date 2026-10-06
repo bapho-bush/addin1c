@@ -1,4 +1,4 @@
-use std::ffi::{c_long, c_ushort};
+use std::ffi::{c_int, c_long, c_ushort, c_void};
 
 use crate::{tvariant::TVariant, CStr1C};
 
@@ -25,6 +25,89 @@ struct ConnectionVTable {
     clean_event_buffer: unsafe extern "system" fn(&Connection),
     set_status_line: unsafe extern "system" fn(&Connection, *mut u16) -> bool,
     reset_status_line: unsafe extern "system" fn(&Connection),
+    // IAddInDefBaseEx, enabled only after SetPlatformCapabilities >= 1.
+    get_interface: unsafe extern "system" fn(&Connection, c_int) -> *const c_void,
+}
+
+#[cfg(test)]
+mod attached_info_tests {
+    use super::*;
+    use std::{
+        mem, ptr,
+        sync::atomic::{AtomicI32, Ordering},
+    };
+
+    #[repr(C)]
+    struct MockAttached {
+        vptr: *const AttachedInfoVTable,
+        mode: AtomicI32,
+    }
+    #[repr(C)]
+    struct MockConnection {
+        connection: Connection,
+        attached: *const c_void,
+    }
+    unsafe extern "system" fn get_interface(c: &Connection, interface: c_int) -> *const c_void {
+        assert_eq!(interface, 2);
+        (*(c as *const Connection as *const MockConnection)).attached
+    }
+    unsafe extern "system" fn get_mode(a: *const AttachedInfo) -> c_int {
+        (*(a as *const MockAttached)).mode.load(Ordering::Relaxed)
+    }
+
+    #[test]
+    fn actual_attached_state_or_unavailable() {
+        // Only GetInterface is ever called on this mock; unused vtable members
+        // use zeroed placeholders in MaybeUninit, never read as function pointers.
+        let mut table = mem::MaybeUninit::<ConnectionVTable>::zeroed();
+        unsafe {
+            ptr::addr_of_mut!((*table.as_mut_ptr()).get_interface).write(get_interface);
+            let attached_table = AttachedInfoVTable {
+                get_attached_info: get_mode,
+            };
+            let attached = MockAttached {
+                vptr: &attached_table,
+                mode: AtomicI32::new(0),
+            };
+            // Connection stores a reference to a complete vtable; unused members
+            // must still be valid function pointer representations. Populate each
+            // from a non-null function address before creating that reference.
+            let words = table.as_mut_ptr().cast::<usize>();
+            for i in 0..(mem::size_of::<ConnectionVTable>() / mem::size_of::<usize>()) {
+                if words.add(i).read() == 0 {
+                    words.add(i).write(get_interface as *const () as usize);
+                }
+            }
+            let connection = MockConnection {
+                connection: Connection {
+                    vptr1: &*table.as_ptr(),
+                },
+                attached: (&attached as *const MockAttached).cast(),
+            };
+            assert_eq!(connection.connection.is_attached_isolated(), Some(true));
+            attached.mode.store(1, Ordering::Relaxed);
+            assert_eq!(connection.connection.is_attached_isolated(), Some(false));
+            attached.mode.store(99, Ordering::Relaxed);
+            assert_eq!(connection.connection.is_attached_isolated(), None);
+            let unavailable = MockConnection {
+                connection: Connection {
+                    vptr1: &*table.as_ptr(),
+                },
+                attached: ptr::null(),
+            };
+            assert_eq!(unavailable.connection.is_attached_isolated(), None);
+        }
+    }
+}
+
+#[repr(C)]
+struct AttachedInfoVTable {
+    get_attached_info: unsafe extern "system" fn(*const AttachedInfo) -> c_int,
+}
+
+#[repr(C)]
+struct AttachedInfo {
+    vptr: *const AttachedInfoVTable,
 }
 
 #[repr(C)]
@@ -33,6 +116,23 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Query the platform's actual attached mode via SDK IAttachedInfo.
+    ///
+    /// # Safety
+    /// Call only after SetPlatformCapabilities advertised extended interfaces
+    /// with a value >= 1. The platform connection must still be live.
+    pub unsafe fn is_attached_isolated(&self) -> Option<bool> {
+        // eIAttachedInfo = 2 on desktop targets; Android is outside project scope.
+        let interface = (self.vptr1.get_interface)(self, 2) as *const AttachedInfo;
+        if interface.is_null() || (*interface).vptr.is_null() {
+            return None;
+        }
+        match ((*(*interface).vptr).get_attached_info)(interface) {
+            0 => Some(true),
+            1 => Some(false),
+            _ => None,
+        }
+    }
     pub fn external_event(
         &self,
         source: impl AsRef<CStr1C>,
