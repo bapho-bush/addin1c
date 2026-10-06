@@ -82,7 +82,12 @@ mod attached_info_tests {
                 connection: Connection {
                     vptr1: &*table.as_ptr(),
                 },
-                attached: (&attached as *const MockAttached).cast(),
+                attached: {
+                    let pointer = (&attached as *const MockAttached).cast::<u8>();
+                    #[cfg(target_env = "msvc")]
+                    let pointer = pointer.add(mem::size_of::<*const ()>());
+                    pointer.cast()
+                },
             };
             assert_eq!(connection.connection.is_attached_isolated(), Some(true));
             attached.mode.store(1, Ordering::Relaxed);
@@ -123,8 +128,18 @@ impl Connection {
     /// with a value >= 1. The platform connection must still be live.
     pub unsafe fn is_attached_isolated(&self) -> Option<bool> {
         // eIAttachedInfo = 2 on desktop targets; Android is outside project scope.
-        let interface = (self.vptr1.get_interface)(self, 2) as *const AttachedInfo;
-        if interface.is_null() || (*interface).vptr.is_null() {
+        let base = (self.vptr1.get_interface)(self, 2);
+        if base.is_null() {
+            return None;
+        }
+        // SDK returns IInterface*, not IAttachedInfo*. MSVC places its empty
+        // IInterface base after the derived vptr; this mirrors C++ static_cast.
+        #[cfg(target_env = "msvc")]
+        let interface =
+            base.cast::<u8>().sub(std::mem::size_of::<*const ()>()) as *const AttachedInfo;
+        #[cfg(not(target_env = "msvc"))]
+        let interface = base as *const AttachedInfo;
+        if (*interface).vptr.is_null() {
             return None;
         }
         match ((*(*interface).vptr).get_attached_info)(interface) {

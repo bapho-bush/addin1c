@@ -42,3 +42,7 @@ SDK-интерфейс `IAttachedInfo` (`IAddInDefBaseEx::GetInterface(eIAttache
 расширенных интерфейсов (`SetPlatformCapabilities >= 1`). `GetAttachType`
 объявляет возможности компоненты и не заменяет эту проверку. Windows/Linux/macOS
 используют desktop SDK значение `eIAttachedInfo = 2`; Android не входит в этот API.
+Возвращаемый SDK `IInterface*` приводится к `IAttachedInfo*` с учётом смещения
+пустого базового класса в MSVC ABI. Для Itanium ABI используется EBO без смещения.
+Windows x64 проверяется C++ SDK-хостом с обычными типизированными приведениями;
+это не заменяет проверку загрузки и режима в реальной 1С.
