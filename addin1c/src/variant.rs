@@ -206,14 +206,22 @@ impl<'a> From<&'a TVariant> for ParamValue<'a> {
                 VariantType::I4 => Self::I32(param.value.i32),
                 VariantType::R8 => Self::F64(param.value.f64),
                 VariantType::TM => Self::Date(param.value.tm),
-                VariantType::Pwstr => Self::Str(from_raw_parts(
-                    param.value.data_str.ptr,
-                    param.value.data_str.len as usize,
-                )),
-                VariantType::Blob => Self::Blob(from_raw_parts(
-                    param.value.data_blob.ptr,
-                    param.value.data_blob.len as usize,
-                )),
+                VariantType::Pwstr => {
+                    let data = param.value.data_str;
+                    Self::Str(if data.len == 0 {
+                        &[]
+                    } else {
+                        from_raw_parts(data.ptr, data.len as usize)
+                    })
+                }
+                VariantType::Blob => {
+                    let data = param.value.data_blob;
+                    Self::Blob(if data.len == 0 {
+                        &[]
+                    } else {
+                        from_raw_parts(data.ptr, data.len as usize)
+                    })
+                }
                 _ => Self::Empty,
             }
         }
@@ -230,3 +238,52 @@ impl fmt::Display for IncompatibleTypeError {
 }
 
 impl std::error::Error for IncompatibleTypeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tvariant::{DataBlob, DataStr, VariantValue};
+
+    #[test]
+    fn empty_sdk_buffers_accept_null_without_constructing_null_slices() {
+        let blob = TVariant {
+            value: VariantValue {
+                data_blob: DataBlob {
+                    ptr: std::ptr::null_mut(),
+                    len: 0,
+                },
+            },
+            elements: 0,
+            vt: VariantType::Blob,
+        };
+        assert!(matches!(ParamValue::from(&blob), ParamValue::Blob(bytes) if bytes.is_empty()));
+        let text = TVariant {
+            value: VariantValue {
+                data_str: DataStr {
+                    ptr: std::ptr::null_mut(),
+                    len: 0,
+                },
+            },
+            elements: 0,
+            vt: VariantType::Pwstr,
+        };
+        assert!(matches!(ParamValue::from(&text), ParamValue::Str(chars) if chars.is_empty()));
+
+        let mut bytes = [0, 255, 1];
+        let blob = TVariant {
+            value: VariantValue {
+                data_blob: DataBlob {
+                    ptr: bytes.as_mut_ptr(),
+                    len: bytes.len() as u32,
+                },
+            },
+            elements: 0,
+            vt: VariantType::Blob,
+        };
+        let ParamValue::Blob(borrowed) = ParamValue::from(&blob) else {
+            panic!("Blob type lost")
+        };
+        assert_eq!(borrowed, bytes);
+        assert_eq!(borrowed.as_ptr(), bytes.as_ptr());
+    }
+}
